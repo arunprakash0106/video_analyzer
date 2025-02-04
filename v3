@@ -59,6 +59,9 @@ class VideoAnalyzerApp:
                         center = ((x1 + x2) // 2, (y1 + y2) // 2)
                         detected_objects.append((center, class_id, (x1, y1, x2, y2)))
 
+                # Sort objects from left to right
+                detected_objects.sort(key=lambda obj: obj[0][0])
+
                 # Match with tracked objects
                 for center, class_id, bbox in detected_objects:
                     matched = False
