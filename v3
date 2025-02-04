@@ -1,0 +1,111 @@
+import cv2
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+from ultralytics import YOLO
+import datetime
+
+# Load YOLOv8 model
+model = YOLO('yolov8n.pt')  # Using YOLOv8 nano for speed.
+
+# Classes of interest
+TARGET_CLASSES = {
+    63: 'laptop',  # Laptop class ID
+    64: 'mouse'    # Mouse class ID
+}
+
+# GUI Application
+class VideoAnalyzerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Video Object Detector")
+
+        self.upload_btn = tk.Button(root, text="Upload Video", command=self.upload_video)
+        self.upload_btn.pack(pady=10)
+
+        self.video_label = tk.Label(root)
+        self.video_label.pack()
+
+        self.tracked_objects = {}  # Track objects across frames
+        self.presence_times = {}   # Track presence times
+        self.object_counter = {63: 0, 64: 0}  # Counter for unique IDs
+
+    def upload_video(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4;*.avi;*.mov")])
+        if file_path:
+            self.analyze_video(file_path)
+
+    def analyze_video(self, video_path):
+        cap = cv2.VideoCapture(video_path)
+        frame_rate = int(cap.get(cv2.CAP_PROP_FPS))
+        frame_count = 0
+
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_count += 1
+            if frame_count % 10 == 0:
+                results = model(frame)
+                current_time = frame_count // frame_rate
+
+                detected_objects = []
+                for obj in results[0].boxes.data:
+                    class_id = int(obj[5])
+                    if class_id in TARGET_CLASSES:
+                        x1, y1, x2, y2 = map(int, obj[:4])
+                        center = ((x1 + x2) // 2, (y1 + y2) // 2)
+                        detected_objects.append((center, class_id, (x1, y1, x2, y2)))
+
+                # Match with tracked objects
+                for center, class_id, bbox in detected_objects:
+                    matched = False
+                    for obj_id, (prev_center, prev_class, last_seen) in self.tracked_objects.items():
+                        if prev_class == class_id and abs(center[0] - prev_center[0]) < 50 and abs(center[1] - prev_center[1]) < 50:
+                            matched = True
+                            self.tracked_objects[obj_id] = (center, class_id, current_time)
+                            break
+
+                    if not matched:
+                        self.object_counter[class_id] += 1
+                        obj_id = f"{TARGET_CLASSES[class_id]}_{self.object_counter[class_id]}"
+                        self.tracked_objects[obj_id] = (center, class_id, current_time)
+                        self.presence_times[obj_id] = 0
+
+                    self.presence_times[obj_id] += 1 / (frame_rate / 10)
+
+                    # Draw bounding box
+                    x1, y1, x2, y2 = bbox
+                    color = (0, 255, 0) if class_id == 63 else (255, 0, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, obj_id, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                # Display frame
+                frame = cv2.resize(frame, (640, 360))
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                imgtk = ImageTk.PhotoImage(image=img)
+                self.video_label.imgtk = imgtk
+                self.video_label.configure(image=imgtk)
+                self.root.update()
+
+        cap.release()
+        self.export_log()
+
+    def export_log(self):
+        data = [{'Object ID': obj_id, 'Total Presence (s)': round(time, 2)} for obj_id, time in self.presence_times.items()]
+        df = pd.DataFrame(data)
+
+        output_file = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV files", "*.csv")], title="Save Detection Log")
+        if output_file:
+            df.to_csv(output_file, index=False)
+            messagebox.showinfo("Success", f"Detection log saved to {output_file}")
+        else:
+            messagebox.showwarning("Cancelled", "Log export was cancelled.")
+
+# Run the app
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VideoAnalyzerApp(root)
+    root.mainloop()
