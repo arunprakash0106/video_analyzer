@@ -1,0 +1,113 @@
+import cv2
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+from ultralytics import YOLO
+import datetime
+
+# Load YOLOv8 model
+model = YOLO('yolov8n.pt')  # Using YOLOv8 nano for speed. Replace with appropriate model if needed.
+
+# Classes of interest (IDs based on COCO dataset)
+TARGET_CLASSES = {
+    63: 'laptop',  # Laptop class ID
+    64: 'mouse'    # Mouse class ID
+}
+
+# GUI Application
+class VideoAnalyzerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Video Object Detector")
+
+        self.upload_btn = tk.Button(root, text="Upload Video", command=self.upload_video)
+        self.upload_btn.pack(pady=10)
+
+        self.video_label = tk.Label(root)
+        self.video_label.pack()
+
+        self.log = []  # To store detection logs
+
+    def upload_video(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4;*.avi;*.mov")])
+        if file_path:
+            self.analyze_video(file_path)
+
+    def analyze_video(self, video_path):
+        cap = cv2.VideoCapture(video_path)
+        frame_rate = int(cap.get(cv2.CAP_PROP_FPS))  # Frame rate for accurate timestamping
+
+        frame_count = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            frame_count += 1
+            # Process every 10th frame to reduce load
+            if frame_count % 10 == 0:
+                results = model(frame)
+
+                current_time = str(datetime.timedelta(seconds=frame_count // frame_rate))
+                detected_objects = {name: 0 for name in TARGET_CLASSES.values()}
+
+                objects = []
+                for obj in results[0].boxes.data:
+                    class_id = int(obj[5])
+                    if class_id in TARGET_CLASSES:
+                        x1, y1, x2, y2 = map(int, obj[:4])
+                        center_x = (x1 + x2) // 2
+
+                        objects.append((center_x, x1, y1, x2, y2, class_id))
+
+                # Sort objects left to right
+                objects.sort(key=lambda x: x[0])
+
+                # Label and count objects
+                counters = {63: 0, 64: 0}
+                for obj in objects:
+                    center_x, x1, y1, x2, y2, class_id = obj
+                    counters[class_id] += 1
+
+                    label = f"{TARGET_CLASSES[class_id]} {counters[class_id]}"
+                    color = (0, 255, 0) if class_id == 63 else (255, 0, 0)  # Green for laptops, blue for mice
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+
+                    detected_objects[TARGET_CLASSES[class_id]] += 1
+
+                # Log detections
+                self.log.append({
+                    'Timestamp': current_time,
+                    'Laptops': detected_objects['laptop'],
+                    'Mice': detected_objects['mouse']
+                })
+
+                # Display frame
+                frame = cv2.resize(frame, (640, 360))
+                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                imgtk = ImageTk.PhotoImage(image=img)
+                self.video_label.imgtk = imgtk
+                self.video_label.configure(image=imgtk)
+                self.root.update()
+
+        cap.release()
+        self.export_log()
+
+    def export_log(self):
+        df = pd.DataFrame(self.log)
+        output_file = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                   filetypes=[("CSV files", "*.csv")],
+                                                   title="Save Detection Log")
+        if output_file:
+            df.to_csv(output_file, index=False)
+            messagebox.showinfo("Success", f"Detection log saved to {output_file}")
+        else:
+            messagebox.showwarning("Cancelled", "Log export was cancelled.")
+
+# Run the app
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = VideoAnalyzerApp(root)
+    root.mainloop()
