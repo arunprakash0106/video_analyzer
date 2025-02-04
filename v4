@@ -1,61 +1,19 @@
 import cv2
+import pandas as pd
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 from PIL import Image, ImageTk
 from ultralytics import YOLO
-import numpy as np
-import time
+import datetime
 
 # Load YOLOv8 model
-model = YOLO('yolov8n.pt')  # Using YOLOv8 nano for speed
+model = YOLO('yolov8n.pt')  # Using YOLOv8 nano for speed. Replace with appropriate model if needed.
 
 # Classes of interest (IDs based on COCO dataset)
 TARGET_CLASSES = {
     63: 'laptop',  # Laptop class ID
     64: 'mouse'    # Mouse class ID
 }
-
-# Object Tracker Class
-class ObjectTracker:
-    def __init__(self):
-        self.next_id = 1
-        self.objects = {}  # Format: {id: (center_x, center_y, last_seen, class_id)}
-        self.timers = {}   # Format: {id: start_time}
-        self.max_disappeared = 30  # Frames to wait before considering object lost
-
-    def update(self, detections, frame_count):
-        current_time = time.time()
-        matched_ids = set()
-
-        for (x1, y1, x2, y2, class_id, confidence) in detections:
-            center_x = (x1 + x2) // 2
-            center_y = (y1 + y2) // 2
-            min_dist = float('inf')
-            matched_id = None
-
-            for obj_id, (prev_x, prev_y, last_seen, obj_class_id) in self.objects.items():
-                if class_id == obj_class_id:
-                    dist = np.linalg.norm([center_x - prev_x, center_y - prev_y])
-                    if dist < min_dist and dist < 75:
-                        min_dist = dist
-                        matched_id = obj_id
-
-            if matched_id is None:
-                matched_id = self.next_id
-                self.next_id += 1
-                self.timers[matched_id] = current_time
-
-            self.objects[matched_id] = (center_x, center_y, frame_count, class_id)
-            matched_ids.add(matched_id)
-
-        # Keep unmatched objects if not disappeared for too long
-        self.objects = {obj_id: (x, y, last_seen, cls_id) for obj_id, (x, y, last_seen, cls_id) in self.objects.items()
-                        if frame_count - last_seen <= self.max_disappeared or obj_id in matched_ids}
-
-        return self.objects
-
-    def get_presence_time(self, obj_id):
-        return time.time() - self.timers.get(obj_id, time.time())
 
 # GUI Application
 class VideoAnalyzerApp:
@@ -69,7 +27,8 @@ class VideoAnalyzerApp:
         self.video_label = tk.Label(root)
         self.video_label.pack()
 
-        self.tracker = ObjectTracker()
+        self.log = []         # Log of detection counts per processed frame
+        self.event_log = []   # Log of events when objects are added or removed
 
     def upload_video(self):
         file_path = filedialog.askopenfilename(filetypes=[("Video files", "*.mp4;*.avi;*.mov")])
@@ -78,50 +37,117 @@ class VideoAnalyzerApp:
 
     def analyze_video(self, video_path):
         cap = cv2.VideoCapture(video_path)
+        frame_rate = int(cap.get(cv2.CAP_PROP_FPS))  # Frame rate for accurate timestamping
 
         frame_count = 0
+        # Initialize previous detection counts for event logging.
+        prev_detected = {'laptop': 0, 'mouse': 0}
+
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
 
             frame_count += 1
+            # Process every 10th frame to reduce computational load
             if frame_count % 10 == 0:
                 results = model(frame)
 
-                detections = []
+                # Calculate the current timestamp of the frame
+                current_time_seconds = frame_count // frame_rate
+                current_time = str(datetime.timedelta(seconds=current_time_seconds))
+
+                # Initialize current detections for both target classes.
+                detected_objects = {name: 0 for name in TARGET_CLASSES.values()}
+
+                # Gather detected objects from the model's output.
+                objects = []
                 for obj in results[0].boxes.data:
                     class_id = int(obj[5])
                     if class_id in TARGET_CLASSES:
                         x1, y1, x2, y2 = map(int, obj[:4])
-                        confidence = float(obj[4])
-                        detections.append((x1, y1, x2, y2, class_id, confidence))
+                        center_x = (x1 + x2) // 2
+                        objects.append((center_x, x1, y1, x2, y2, class_id))
 
-                tracked_objects = self.tracker.update(detections, frame_count)
-                frame = self.draw_detections(frame, tracked_objects, frame_count)
+                # Sort objects left to right based on center x-coordinate.
+                objects.sort(key=lambda x: x[0])
 
-                frame = cv2.resize(frame, (640, 360))
-                img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                # Count and label objects as they are drawn.
+                counters = {63: 0, 64: 0}
+                for obj in objects:
+                    center_x, x1, y1, x2, y2, class_id = obj
+                    counters[class_id] += 1
+                    label = f"{TARGET_CLASSES[class_id]} {counters[class_id]}"
+                    # Set different colors for different classes.
+                    color = (0, 255, 0) if class_id == 63 else (255, 0, 0)  # Green for laptops, blue for mice
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    detected_objects[TARGET_CLASSES[class_id]] += 1
+
+                # Log the current frame's detection counts.
+                self.log.append({
+                    'Timestamp': current_time,
+                    'Laptops': detected_objects['laptop'],
+                    'Mice': detected_objects['mouse']
+                })
+
+                # Check for changes compared to the previous processed frame
+                for obj_name in ['laptop', 'mouse']:
+                    current_count = detected_objects[obj_name]
+                    previous_count = prev_detected[obj_name]
+                    if current_count != previous_count:
+                        change = current_count - previous_count
+                        action = "added" if change > 0 else "removed"
+                        event_description = f"{abs(change)} {obj_name}(s) {action}"
+                        self.event_log.append({
+                            'Timestamp': current_time,
+                            'Event': event_description
+                        })
+                        # Optionally, display the event on the frame
+                        cv2.putText(frame, event_description, (10, 70 if obj_name == 'laptop' else 100),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+                # Update the previous detection counts.
+                prev_detected = detected_objects.copy()
+
+                # Overlay live timer on the video frame.
+                cv2.putText(frame, f"Time: {current_time}", (10, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                # Display frame (resize for the GUI window)
+                frame_resized = cv2.resize(frame, (640, 360))
+                img = Image.fromarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
                 imgtk = ImageTk.PhotoImage(image=img)
                 self.video_label.imgtk = imgtk
                 self.video_label.configure(image=imgtk)
                 self.root.update()
 
         cap.release()
+        self.export_logs()
 
-    def draw_detections(self, frame, tracked_objects, frame_count):
-        for obj_id, (center_x, center_y, last_seen, class_id) in tracked_objects.items():
-            color = (0, 255, 0) if class_id == 63 else (255, 0, 0)
-            presence_time = self.tracker.get_presence_time(obj_id)
-            label = f"{TARGET_CLASSES[class_id]} ID:{obj_id} {presence_time:.1f}s"
+    def export_logs(self):
+        # Export the detection log
+        df_detection = pd.DataFrame(self.log)
+        output_file = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                   filetypes=[("CSV files", "*.csv")],
+                                                   title="Save Detection Log")
+        if output_file:
+            df_detection.to_csv(output_file, index=False)
+            messagebox.showinfo("Success", f"Detection log saved to {output_file}")
+        else:
+            messagebox.showwarning("Cancelled", "Detection log export was cancelled.")
 
-            cv2.rectangle(frame, (center_x - 50, center_y - 50), (center_x + 50, center_y + 50), color, 2)
-
-            (w, h), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-            cv2.rectangle(frame, (center_x - 50, center_y - 70), (center_x - 50 + w, center_y - 50), color, -1)
-            cv2.putText(frame, label, (center_x - 50, center_y - 55), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        return frame
+        # Ask to export the event log if any events were recorded.
+        if self.event_log:
+            df_events = pd.DataFrame(self.event_log)
+            output_file_events = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                              filetypes=[("CSV files", "*.csv")],
+                                                              title="Save Event Log")
+            if output_file_events:
+                df_events.to_csv(output_file_events, index=False)
+                messagebox.showinfo("Success", f"Event log saved to {output_file_events}")
+            else:
+                messagebox.showwarning("Cancelled", "Event log export was cancelled.")
 
 # Run the app
 if __name__ == "__main__":
