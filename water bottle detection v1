@@ -16,34 +16,37 @@ TARGET_CLASSES = {
     73: 'notebook'  # Notebook class ID
 }
 
+
 # GUI Application
 class LiveObjectDetector:
     def __init__(self, root):
         self.root = root
         self.root.title("Live Object Detector")
-        
+
         self.start_btn = tk.Button(root, text="Start Detection", command=self.start_detection)
         self.start_btn.pack(pady=10)
-        
+
         self.stop_btn = tk.Button(root, text="Stop Detection", command=self.stop_detection, state=tk.DISABLED)
         self.stop_btn.pack(pady=10)
-        
+
         self.video_label = tk.Label(root)
         self.video_label.pack()
-        
+
         self.event_log = []  # Log of detected objects
         self.running = False
         self.cap = None
         self.thread = None
         self.active_objects = set()
-    
+        self.total_counts = {'bottle': 0, 'notebook': 0}
+        self.tracked_objects = set()
+
     def start_detection(self):
         self.running = True
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
         self.thread = threading.Thread(target=self.detect_objects)
         self.thread.start()
-    
+
     def stop_detection(self):
         self.running = False
         if self.cap:
@@ -51,17 +54,17 @@ class LiveObjectDetector:
         self.start_btn.config(state=tk.NORMAL)
         self.stop_btn.config(state=tk.DISABLED)
         self.export_event_log()
-    
+
     def detect_objects(self):
         self.cap = cv2.VideoCapture(0)
         while self.running and self.cap.isOpened():
             ret, frame = self.cap.read()
             if not ret:
                 break
-            
+
             results = model(frame)
             detected_now = set()
-            
+
             for obj in results[0].boxes.data:
                 class_id = int(obj[5])
                 if class_id in TARGET_CLASSES:
@@ -71,29 +74,33 @@ class LiveObjectDetector:
                     color = (0, 255, 0) if class_id == 39 else (255, 0, 0)
                     cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
                     cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
-            
-            new_detections = detected_now - self.active_objects
-            lost_detections = self.active_objects - detected_now
-            
-            for obj_name in new_detections:
-                event_description = f"1 {obj_name} detected"
+
+            # Track objects entering and leaving the frame
+            new_entries = detected_now - self.tracked_objects
+            lost_entries = self.tracked_objects - detected_now
+
+            for obj_name in lost_entries:
+                self.total_counts[obj_name] += 1
+                event_description = f"Total {obj_name}(s): {self.total_counts[obj_name]}"
                 self.event_log.append({
                     'Timestamp': datetime.datetime.now().strftime("%H:%M:%S"),
                     'Event': event_description,
                     'Object': obj_name
                 })
-            
-            self.active_objects = detected_now
-            
+                cv2.putText(frame, event_description, (10, 50 if obj_name == 'bottle' else 80),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+
+            self.tracked_objects = detected_now
+
             frame_resized = cv2.resize(frame, (640, 360))
             img = Image.fromarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
             imgtk = ImageTk.PhotoImage(image=img)
             self.video_label.imgtk = imgtk
             self.video_label.configure(image=imgtk)
             self.root.update()
-        
+
         self.cap.release()
-    
+
     def export_event_log(self):
         if self.event_log:
             df_events = pd.DataFrame(self.event_log)
@@ -107,6 +114,7 @@ class LiveObjectDetector:
                 messagebox.showwarning("Cancelled", "Event log export was cancelled.")
         else:
             messagebox.showinfo("No Events", "No events were recorded during detection.")
+
 
 # Run the app
 if __name__ == "__main__":
