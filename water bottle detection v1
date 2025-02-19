@@ -1,0 +1,117 @@
+import cv2
+import pandas as pd
+import tkinter as tk
+from tkinter import filedialog, messagebox
+from PIL import Image, ImageTk
+from ultralytics import YOLO
+import datetime
+import threading
+
+# Load YOLOv8 model
+model = YOLO('yolov8n.pt')  # Using YOLOv8 nano for speed.
+
+# Classes of interest (IDs based on COCO dataset)
+TARGET_CLASSES = {
+    39: 'bottle',  # Water bottle class ID
+    73: 'notebook'  # Notebook class ID
+}
+
+
+# GUI Application
+class LiveObjectDetector:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Live Object Detector")
+
+        self.start_btn = tk.Button(root, text="Start Detection", command=self.start_detection)
+        self.start_btn.pack(pady=10)
+
+        self.stop_btn = tk.Button(root, text="Stop Detection", command=self.stop_detection, state=tk.DISABLED)
+        self.stop_btn.pack(pady=10)
+
+        self.video_label = tk.Label(root)
+        self.video_label.pack()
+
+        self.event_log = []  # Log of detected objects
+        self.running = False
+        self.cap = None
+        self.thread = None
+
+    def start_detection(self):
+        self.running = True
+        self.start_btn.config(state=tk.DISABLED)
+        self.stop_btn.config(state=tk.NORMAL)
+        self.thread = threading.Thread(target=self.detect_objects)
+        self.thread.start()
+
+    def stop_detection(self):
+        self.running = False
+        if self.cap:
+            self.cap.release()
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_btn.config(state=tk.DISABLED)
+        self.export_event_log()
+
+    def detect_objects(self):
+        self.cap = cv2.VideoCapture(0)
+        prev_detected = {'bottle': 0, 'notebook': 0}
+
+        while self.running and self.cap.isOpened():
+            ret, frame = self.cap.read()
+            if not ret:
+                break
+
+            results = model(frame)
+            detected_objects = {name: 0 for name in TARGET_CLASSES.values()}
+
+            for obj in results[0].boxes.data:
+                class_id = int(obj[5])
+                if class_id in TARGET_CLASSES:
+                    x1, y1, x2, y2 = map(int, obj[:4])
+                    label = TARGET_CLASSES[class_id]
+                    color = (0, 255, 0) if class_id == 39 else (255, 0, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                    detected_objects[label] += 1
+
+            for obj_name in ['bottle', 'notebook']:
+                if detected_objects[obj_name] != prev_detected[obj_name]:
+                    event_description = f"{detected_objects[obj_name]} {obj_name}(s) detected"
+                    self.event_log.append({
+                        'Timestamp': datetime.datetime.now().strftime("%H:%M:%S"),
+                        'Event': event_description,
+                        'Total Bottles': detected_objects['bottle'],
+                        'Total Notebooks': detected_objects['notebook']
+                    })
+
+            prev_detected = detected_objects.copy()
+
+            frame_resized = cv2.resize(frame, (640, 360))
+            img = Image.fromarray(cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB))
+            imgtk = ImageTk.PhotoImage(image=img)
+            self.video_label.imgtk = imgtk
+            self.video_label.configure(image=imgtk)
+            self.root.update()
+
+        self.cap.release()
+
+    def export_event_log(self):
+        if self.event_log:
+            df_events = pd.DataFrame(self.event_log)
+            output_file = filedialog.asksaveasfilename(defaultextension=".csv",
+                                                       filetypes=[("CSV files", "*.csv")],
+                                                       title="Save Event Log")
+            if output_file:
+                df_events.to_csv(output_file, index=False)
+                messagebox.showinfo("Success", f"Event log saved to {output_file}")
+            else:
+                messagebox.showwarning("Cancelled", "Event log export was cancelled.")
+        else:
+            messagebox.showinfo("No Events", "No events were recorded during detection.")
+
+
+# Run the app
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = LiveObjectDetector(root)
+    root.mainloop()
